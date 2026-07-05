@@ -49,24 +49,32 @@ function captureLog(type, message) {
   mainWindow?.webContents.send('omni-log', entry);
 }
 
-// Check if OmniRoute is running via HTTP
+// Check if OmniRoute is running via HTTP (tries both localhost and configured host)
 async function checkOmniRouteStatus() {
-  return new Promise((resolve) => {
-    const req = http.get(`http://${config.host}:${config.port}/v1/models`, (res) => {
-      let data = '';
-      res.on('data', (chunk) => data += chunk);
-      res.on('end', () => {
-        try {
-          const parsed = JSON.parse(data);
-          resolve({ running: true, models: parsed.data?.length || 0 });
-        } catch {
-          resolve({ running: false, models: 0 });
-        }
+  const hosts = ['127.0.0.1', config.host];
+  // Deduplicate
+  const uniqueHosts = [...new Set(hosts)];
+
+  for (const host of uniqueHosts) {
+    const result = await new Promise((resolve) => {
+      const req = http.get(`http://${host}:${config.port}/v1/models`, (res) => {
+        let data = '';
+        res.on('data', (chunk) => data += chunk);
+        res.on('end', () => {
+          try {
+            const parsed = JSON.parse(data);
+            resolve({ running: true, models: parsed.data?.length || 0, host });
+          } catch {
+            resolve({ running: false, models: 0, host });
+          }
+        });
       });
+      req.on('error', () => resolve({ running: false, models: 0, host }));
+      req.setTimeout(2000, () => { req.destroy(); resolve({ running: false, models: 0, host }); });
     });
-    req.on('error', () => resolve({ running: false, models: 0 }));
-    req.setTimeout(2000, () => { req.destroy(); resolve({ running: false, models: 0 }); });
-  });
+    if (result.running) return result;
+  }
+  return { running: false, models: 0 };
 }
 
 // Start OmniRoute
@@ -183,22 +191,29 @@ ipcMain.handle('omni-status', async () => {
 });
 
 ipcMain.handle('omni-models', async () => {
-  return new Promise((resolve) => {
-    const req = http.get(`http://${config.host}:${config.port}/v1/models`, (res) => {
-      let data = '';
-      res.on('data', (chunk) => data += chunk);
-      res.on('end', () => {
-        try {
-          const parsed = JSON.parse(data);
-          resolve({ success: true, models: parsed.data || [] });
-        } catch {
-          resolve({ success: false, models: [] });
-        }
+  const hosts = ['127.0.0.1', config.host];
+  const uniqueHosts = [...new Set(hosts)];
+
+  for (const host of uniqueHosts) {
+    const result = await new Promise((resolve) => {
+      const req = http.get(`http://${host}:${config.port}/v1/models`, (res) => {
+        let data = '';
+        res.on('data', (chunk) => data += chunk);
+        res.on('end', () => {
+          try {
+            const parsed = JSON.parse(data);
+            resolve({ success: true, models: parsed.data || [] });
+          } catch {
+            resolve({ success: false, models: [] });
+          }
+        });
       });
+      req.on('error', () => resolve({ success: false, models: [] }));
+      req.setTimeout(5000, () => { req.destroy(); resolve({ success: false, models: [] }); });
     });
-    req.on('error', () => resolve({ success: false, models: [] }));
-    req.setTimeout(5000, () => { req.destroy(); resolve({ success: false, models: [] }); });
-  });
+    if (result.success) return result;
+  }
+  return { success: false, models: [] };
 });
 
 ipcMain.handle('config-get', () => config);
