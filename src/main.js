@@ -6,6 +6,7 @@ const fs = require('fs');
 
 let mainWindow;
 let omniRouteProcess = null;
+let omniRouteOwned = false; // true if we spawned it
 
 // Store config
 const configPath = path.join(app.getPath('userData'), 'config.json');
@@ -74,7 +75,17 @@ async function startOmniRoute() {
     return { success: false, message: 'Already running' };
   }
 
+  // Check if OmniRoute is already running externally (e.g. from terminal)
+  const status = await checkOmniRouteStatus();
+  if (status.running) {
+    captureLog('info', `OmniRoute already running on port ${config.port} (external process)`);
+    omniRouteOwned = false;
+    mainWindow?.webContents.send('omni-started');
+    return { success: true, message: 'Already running externally' };
+  }
+
   try {
+    omniRouteOwned = true;
     const env = {
       ...process.env,
       NODE_OPTIONS: '--dns-result-order=ipv4first',
@@ -120,6 +131,17 @@ async function startOmniRoute() {
 
 // Stop OmniRoute
 async function stopOmniRoute() {
+  if (!omniRouteProcess && !omniRouteOwned) {
+    // Check if running externally
+    const status = await checkOmniRouteStatus();
+    if (!status.running) {
+      return { success: false, message: 'Not running' };
+    }
+    // Running externally - can't kill it
+    captureLog('info', 'OmniRoute is running externally — cannot stop from app');
+    return { success: false, message: 'Running externally — stop it from terminal' };
+  }
+
   if (!omniRouteProcess) {
     return { success: false, message: 'Not running' };
   }
@@ -243,7 +265,7 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
-  if (omniRouteProcess) {
+  if (omniRouteProcess && omniRouteOwned) {
     if (process.platform === 'win32') {
       spawn('taskkill', ['/pid', String(omniRouteProcess.pid), '/t', '/f'], { shell: true });
     } else {
