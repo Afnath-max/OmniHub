@@ -1,0 +1,16 @@
+{
+  "name": "omnihub",
+  "version": "1.0.0",
+  "description": "Electron desktop app to manage OmniRoute AI Gateway",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev"
+  },
+  "author": "Afnath Ahamed",
+  "license": "MIT",
+  "dependencies": {
+    "electron": "^35.0.0"
+  },
+  "devDependencies": {}
+}
