@@ -6,14 +6,37 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
-    "build": "electron-builder"
+    "build": "electron-builder --win --dir",
+    "build:installer": "cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win nsis"
   },
   "author": "Afnath Ahamed",
   "license": "MIT",
-  "dependencies": {
-    "electron": "^35.0.0"
-  },
+  "dependencies": {},
   "devDependencies": {
+    "electron": "^35.0.0",
     "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "com.omnihub.app",
+    "productName": "OmniHub",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": "dir",
+      "icon": "src/assets/icon.ico"
+    },
+    "mac": {
+      "target": "dmg",
+      "icon": "src/assets/icon.icns"
+    },
+    "linux": {
+      "target": "AppImage",
+      "icon": "src/assets/icon.png"
+    }
   }
 }

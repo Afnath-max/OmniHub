@@ -1,13 +1,11 @@
-const { app, BrowserWindow, ipcMain, shell, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, shell } = require('electron');
 const path = require('path');
-const { spawn, exec } = require('child_process');
+const { spawn } = require('child_process');
 const http = require('http');
 const fs = require('fs');
 
 let mainWindow;
 let omniRouteProcess = null;
-let omniRoutePort = 20128;
-let omniRouteHost = '127.0.0.1';
 
 // Store config
 const configPath = path.join(app.getPath('userData'), 'config.json');
@@ -22,7 +20,8 @@ let config = {
 function loadConfig() {
   try {
     if (fs.existsSync(configPath)) {
-      config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      const saved = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      config = { ...config, ...saved };
     }
   } catch (e) {
     console.error('Config load error:', e);
@@ -32,13 +31,24 @@ function loadConfig() {
 // Save config
 function saveConfig() {
   try {
+    const dir = path.dirname(configPath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
   } catch (e) {
     console.error('Config save error:', e);
   }
 }
 
-// Check if OmniRoute is running
+// Logs storage
+let logs = [];
+function captureLog(type, message) {
+  const entry = { time: new Date().toISOString(), type, message: message.trim() };
+  logs.push(entry);
+  if (logs.length > 1000) logs = logs.slice(-500);
+  mainWindow?.webContents.send('omni-log', entry);
+}
+
+// Check if OmniRoute is running via HTTP
 async function checkOmniRouteStatus() {
   return new Promise((resolve) => {
     const req = http.get(`http://${config.host}:${config.port}/v1/models`, (res) => {
@@ -59,7 +69,7 @@ async function checkOmniRouteStatus() {
 }
 
 // Start OmniRoute
-ipcMain.handle('omni-start', async () => {
+async function startOmniRoute() {
   if (omniRouteProcess) {
     return { success: false, message: 'Already running' };
   }
@@ -80,64 +90,76 @@ ipcMain.handle('omni-start', async () => {
     });
 
     omniRouteProcess.stdout.on('data', (data) => {
-      mainWindow?.webContents.send('omni-log', { type: 'stdout', data: data.toString() });
+      captureLog('stdout', data.toString());
     });
 
     omniRouteProcess.stderr.on('data', (data) => {
-      mainWindow?.webContents.send('omni-log', { type: 'stderr', data: data.toString() });
+      captureLog('stderr', data.toString());
     });
 
     omniRouteProcess.on('close', (code) => {
       omniRouteProcess = null;
+      captureLog('info', `Process exited with code ${code}`);
       mainWindow?.webContents.send('omni-stopped', { code });
     });
 
     omniRouteProcess.on('error', (err) => {
       omniRouteProcess = null;
-      mainWindow?.webContents.send('omni-log', { type: 'error', data: err.message });
+      captureLog('error', `Spawn error: ${err.message}`);
+      mainWindow?.webContents.send('omni-stopped', { code: -1 });
     });
 
+    captureLog('info', 'OmniRoute starting...');
     mainWindow?.webContents.send('omni-started');
     return { success: true, message: 'Started' };
   } catch (err) {
+    captureLog('error', `Start failed: ${err.message}`);
     return { success: false, message: err.message };
   }
-});
+}
 
 // Stop OmniRoute
-ipcMain.handle('omni-stop', async () => {
+async function stopOmniRoute() {
   if (!omniRouteProcess) {
     return { success: false, message: 'Not running' };
   }
 
   try {
+    const pid = omniRouteProcess.pid;
+    captureLog('info', 'Stopping OmniRoute...');
+
     if (process.platform === 'win32') {
-      spawn('taskkill', ['/pid', String(omniRouteProcess.pid), '/t', '/f'], { shell: true });
+      spawn('taskkill', ['/pid', String(pid), '/t', '/f'], { shell: true });
     } else {
       omniRouteProcess.kill('SIGTERM');
     }
-    omniRouteProcess = null;
-    mainWindow?.webContents.send('omni-stopped', { code: 0 });
-    return { success: true, message: 'Stopped' };
+
+    // Don't set omniRouteProcess = null here — let 'close' event handle it
+    return { success: true, message: 'Stop signal sent' };
   } catch (err) {
+    captureLog('error', `Stop failed: ${err.message}`);
     return { success: false, message: err.message };
   }
-});
+}
 
 // Restart OmniRoute
-ipcMain.handle('omni-restart', async () => {
-  await ipcMain.handle('omni-stop');
-  await new Promise(r => setTimeout(r, 1000));
-  return await ipcMain.handle('omni-start');
-});
+async function restartOmniRoute() {
+  const stopResult = await stopOmniRoute();
+  // Wait for process to fully exit
+  await new Promise(r => setTimeout(r, 1500));
+  return await startOmniRoute();
+}
 
-// Get status
+// IPC Handlers
+ipcMain.handle('omni-start', () => startOmniRoute());
+ipcMain.handle('omni-stop', () => stopOmniRoute());
+ipcMain.handle('omni-restart', () => restartOmniRoute());
+
 ipcMain.handle('omni-status', async () => {
   const status = await checkOmniRouteStatus();
   return { ...status, pid: omniRouteProcess?.pid || null };
 });
 
-// Get models list
 ipcMain.handle('omni-models', async () => {
   return new Promise((resolve) => {
     const req = http.get(`http://${config.host}:${config.port}/v1/models`, (res) => {
@@ -157,51 +179,30 @@ ipcMain.handle('omni-models', async () => {
   });
 });
 
-// Get config
-ipcMain.handle('config-get', async () => {
-  return config;
-});
+ipcMain.handle('config-get', () => config);
 
-// Set config
-ipcMain.handle('config-set', async (event, key, value) => {
+ipcMain.handle('config-set', (event, key, value) => {
   config[key] = value;
   saveConfig();
   return { success: true };
 });
 
-// Open dashboard in browser
-ipcMain.handle('open-dashboard', async () => {
+ipcMain.handle('open-dashboard', () => {
   shell.openExternal(`http://${config.host}:${config.port}`);
   return { success: true };
 });
 
-// Open external URL
-ipcMain.handle('open-url', async (event, url) => {
+ipcMain.handle('open-url', (event, url) => {
   shell.openExternal(url);
   return { success: true };
 });
 
-// Get logs (stored in memory)
-let logs = [];
-ipcMain.handle('logs-get', async () => {
-  return logs.slice(-500);
-});
+ipcMain.handle('logs-get', () => logs.slice(-500));
 
-ipcMain.handle('logs-clear', async () => {
+ipcMain.handle('logs-clear', () => {
   logs = [];
   return { success: true };
 });
-
-// Capture logs
-function captureLog(type, data) {
-  const entry = {
-    time: new Date().toISOString(),
-    type,
-    message: data.trim()
-  };
-  logs.push(entry);
-  if (logs.length > 1000) logs = logs.slice(-500);
-}
 
 // Create window
 function createWindow() {
@@ -215,7 +216,7 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false
     },
-    titleBarStyle: 'hiddenInset',
+    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     backgroundColor: '#000000',
     show: false
   });
@@ -237,9 +238,7 @@ app.whenReady().then(() => {
 
   // Auto-start if configured
   if (config.autoStart) {
-    setTimeout(() => {
-      ipcMain.handle('omni-start');
-    }, 2000);
+    setTimeout(() => startOmniRoute(), 2000);
   }
 });
 
